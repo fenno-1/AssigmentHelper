@@ -2,7 +2,7 @@ import streamlit as st
 from dotenv import load_dotenv
 from matcher import fetch_url_text, extract_pdf_text, match_cv_to_assignment
 
-load_dotenv()
+load_dotenv(override=True)
 
 st.set_page_config(page_title="AssigmentHelper", page_icon="📋", layout="wide")
 

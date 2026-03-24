@@ -1,8 +1,9 @@
-import anthropic
+import os
 import requests
 from bs4 import BeautifulSoup
 import pypdf
 import io
+from openai import AzureOpenAI
 
 
 def fetch_url_text(url: str) -> str:
@@ -11,7 +12,6 @@ def fetch_url_text(url: str) -> str:
     resp = requests.get(url, headers=headers, timeout=15)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
-    # Remove script/style noise
     for tag in soup(["script", "style", "nav", "footer", "header"]):
         tag.decompose()
     return soup.get_text(separator="\n", strip=True)
@@ -28,22 +28,20 @@ def match_cv_to_assignment(
     assignment_text: str,
     cv_text: str,
     consultant_name: str,
-) -> dict:
+):
     """
-    Use Claude to match a CV against an assignment and produce:
+    Use Azure OpenAI to match a CV against an assignment and produce:
     - motivation: a short cover letter / motivation text
     - requirements_match: structured analysis of how each requirement is met
+    Yields text chunks for streaming.
     """
-    client = anthropic.Anthropic()
+    client = AzureOpenAI(
+        api_key=os.environ["AZURE_OPENAI_API_KEY"],
+        api_version=os.environ.get("AZURE_OPENAI_API_VERSION", "2024-02-01"),
+        azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+    )
 
-    system_prompt = """You are an expert recruitment consultant helping match IT consultants to assignments.
-Your task is to analyze an assignment description and a consultant's CV, then produce:
-1. A concise, professional motivation letter (3-4 paragraphs) written in first person on behalf of the consultant.
-2. A structured requirement matching analysis showing which requirements are met, partially met, or not met.
-
-Be honest and specific. Reference actual skills and experience from the CV."""
-
-    user_prompt = f"""Assignment Description:
+    prompt = f"""Assignment Description:
 {assignment_text}
 
 ---
@@ -74,16 +72,23 @@ For each key requirement in the assignment, assess the consultant's fit:
 [2-3 sentences summarizing the overall fit and any key gaps]
 """
 
-    with client.messages.stream(
-        model="claude-opus-4-6",
-        max_tokens=4096,
-        thinking={"type": "adaptive"},
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_prompt}],
-    ) as stream:
-        full_text = ""
-        for text in stream.text_stream:
-            full_text += text
-            yield text  # stream chunks to UI
+    stream = client.chat.completions.create(
+        model=os.environ["AZURE_OPENAI_DEPLOYMENT"],
+        messages=[
+            {
+                "role": "system",
+                "content": """You are an expert recruitment consultant helping match IT consultants to assignments.
+Your task is to analyze an assignment description and a consultant's CV, then produce:
+1. A concise, professional motivation letter (3-4 paragraphs) written in first person on behalf of the consultant.
+2. A structured requirement matching analysis showing which requirements are met, partially met, or not met.
 
-    return full_text
+Be honest and specific. Reference actual skills and experience from the CV.""",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        stream=True,
+    )
+
+    for chunk in stream:
+        if chunk.choices and chunk.choices[0].delta.content:
+            yield chunk.choices[0].delta.content
