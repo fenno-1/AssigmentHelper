@@ -1,4 +1,5 @@
 import json
+import os
 import uuid
 from datetime import date, datetime
 from pathlib import Path
@@ -9,7 +10,10 @@ st.set_page_config(page_title="Uppdrag", page_icon="📁", layout="wide")
 
 CONSULTANTS = ["Manuel Kandala", "Mia Aspberg", "Magnus Sörin"]
 STATUSES = ["Öppen", "Intervju", "Vunnen", "Förlorad", "Avböjd"]
-DATA_FILE = Path(__file__).parent.parent / "assignments.json"
+# Path is overridable via env var so deployments (e.g. App Service) can point
+# at persistent storage like /home/data/assignments.json. Defaults to the
+# repo-relative file for local development.
+DATA_FILE = Path(os.environ.get("ASSIGNMENTS_PATH", str(Path(__file__).parent.parent / "assignments.json")))
 
 LIST_COLUMNS = [
     "name",
@@ -48,6 +52,7 @@ def load_assignments() -> list[dict]:
 
 
 def save_assignments(assignments: list[dict]) -> None:
+    DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(assignments, f, ensure_ascii=False, indent=2)
 
