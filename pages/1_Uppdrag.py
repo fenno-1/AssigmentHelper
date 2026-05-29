@@ -1,6 +1,6 @@
 import json
 import uuid
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import streamlit as st
@@ -50,6 +50,20 @@ def load_assignments() -> list[dict]:
 def save_assignments(assignments: list[dict]) -> None:
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(assignments, f, ensure_ascii=False, indent=2)
+
+
+def add_note(assignment_id: str, text: str) -> None:
+    assignments = load_assignments()
+    for a in assignments:
+        if a["id"] == assignment_id:
+            if "notes" not in a:
+                a["notes"] = []
+            a["notes"].append({
+                "text": text,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            })
+            break
+    save_assignments(assignments)
 
 
 def empty_assignment() -> dict:
@@ -217,3 +231,17 @@ for assignment in assignments_sorted:
 
     price = assignment.get("price")
     row_cols[10].write(str(price) if price is not None else "")
+
+    notes = assignment.get("notes", [])
+    label = f"Noteringar ({len(notes)})" if notes else "Noteringar"
+    with st.expander(label):
+        for note in notes:
+            st.markdown(f"**{note['timestamp']}**")
+            st.write(note["text"])
+            st.divider()
+        note_key = f"note_input_{assignment['id']}"
+        new_note = st.text_area("Ny notering", key=note_key, height=80)
+        if st.button("Lägg till notering", key=f"add_note_{assignment['id']}"):
+            if new_note.strip():
+                add_note(assignment["id"], new_note.strip())
+                st.rerun()
