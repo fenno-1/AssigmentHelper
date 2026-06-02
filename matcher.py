@@ -41,6 +41,10 @@ def match_cv_to_assignment(
         azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
     )
 
+    swedish_keywords = ["uppdrag", "krav", "erfarenhet", "ansökan", "konsult", "leverantör", "myndighet", "kommun", "kompetens"]
+    is_swedish = sum(1 for w in swedish_keywords if w in assignment_text.lower()) >= 2
+    language_instruction = "Respond entirely in Swedish." if is_swedish else "Respond in English."
+
     prompt = f"""Assignment Description:
 {assignment_text}
 
@@ -52,6 +56,8 @@ CV / Resume:
 {cv_text}
 
 ---
+
+{language_instruction}
 
 Please provide your analysis in the following format:
 
@@ -77,12 +83,14 @@ For each key requirement in the assignment, assess the consultant's fit:
         messages=[
             {
                 "role": "system",
-                "content": """You are an expert recruitment consultant helping match IT consultants to assignments.
+                "content": f"""You are an expert recruitment consultant helping match IT consultants to assignments.
 Your task is to analyze an assignment description and a consultant's CV, then produce:
 1. A concise, professional motivation letter (3-4 paragraphs) written in first person on behalf of the consultant.
 2. A structured requirement matching analysis showing which requirements are met, partially met, or not met.
 
-Be honest and specific. Reference actual skills and experience from the CV.""",
+Be honest and specific. Reference actual skills and experience from the CV.
+
+{language_instruction}""",
             },
             {"role": "user", "content": prompt},
         ],
