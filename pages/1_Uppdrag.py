@@ -10,6 +10,30 @@ st.set_page_config(page_title="Uppdrag", page_icon="📁", layout="wide")
 
 CONSULTANTS = ["Manuel Kandala", "Mia Aspberg", "Magnus Sörin"]
 STATUSES = ["Öppen", "Intervju", "Vunnen", "Förlorad", "Avböjd"]
+
+# Short-name → canonical mapping used by the Excel importer so that a row with
+# "Manuel" resolves to "Manuel Kandala", etc. Add more aliases here as needed.
+CONSULTANT_ALIASES = {
+    "manuel": "Manuel Kandala",
+    "mia": "Mia Aspberg",
+    "magnus": "Magnus Sörin",
+}
+
+# Excel column header → assignment field. Used by the import-from-Excel UI.
+EXCEL_COLUMN_MAP = {
+    "Status": "status",
+    "Datum": "date",
+    "Konsult": "consultant",
+    "Roll": "name",
+    "Kund": "customer",
+    "Mäklare": "broker",
+    "Länk till uppdraget": "url",
+    "Kontaktperson": "contact_person",
+    "Telefon": "contact_phone",
+    "Mail": "contact_email",
+    "Lämnat timpris": "price",
+}
+EXCEL_COMMENT_COL = "Kommentar"
 # Path is overridable via env var so deployments (e.g. App Service) can point
 # at persistent storage like /home/data/assignments.json. Defaults to the
 # repo-relative file for local development.
@@ -55,6 +79,120 @@ def save_assignments(assignments: list[dict]) -> None:
     DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(assignments, f, ensure_ascii=False, indent=2)
+
+
+def _normalize_consultant(value) -> str:
+    """Map a raw consultant value (e.g. 'Manuel') to the canonical full name.
+    Falls back to the first configured consultant for unknown / empty values."""
+    if value is None:
+        return CONSULTANTS[0]
+    key = str(value).strip().lower()
+    if not key:
+        return CONSULTANTS[0]
+    if key in CONSULTANT_ALIASES:
+        return CONSULTANT_ALIASES[key]
+    for full in CONSULTANTS:
+        if key == full.lower():
+            return full
+    return CONSULTANTS[0]
+
+
+def _excel_date_to_iso(value) -> str:
+    """Coerce an Excel datetime/date/string cell into YYYY-MM-DD."""
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return str(date.today())
+    return str(value).strip()
+
+
+def parse_excel(file) -> tuple[list[dict], list[str]]:
+    """Read an Excel upload and return (parsed_assignments, warnings).
+
+    Validates that the workbook has the expected Swedish column headers, then
+    maps each data row into the same dict shape used elsewhere on this page —
+    new UUID id, ISO date, normalized consultant, Kommentar promoted to a
+    single timestamped note. Empty / header-only files yield ([], [warning])."""
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        return [], ["openpyxl är inte installerat på servern."]
+
+    try:
+        wb = load_workbook(file, data_only=True, read_only=True)
+    except Exception as exc:
+        return [], [f"Kunde inte läsa filen: {exc}"]
+
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        return [], ["Filen är tom."]
+
+    headers = [h.strip() if isinstance(h, str) else h for h in rows[0]]
+    required = list(EXCEL_COLUMN_MAP.keys()) + [EXCEL_COMMENT_COL]
+    missing = [c for c in required if c not in headers]
+    if missing:
+        return [], [f"Saknade kolumner: {', '.join(missing)}"]
+
+    col_idx = {h: i for i, h in enumerate(headers)}
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    parsed: list[dict] = []
+    warnings: list[str] = []
+
+    for r_num, row in enumerate(rows[1:], start=2):
+        # Skip blank rows so a trailing empty line in the sheet is harmless
+        if all(v is None or (isinstance(v, str) and not v.strip()) for v in row):
+            continue
+
+        name_val = row[col_idx["Roll"]]
+        if not name_val or not str(name_val).strip():
+            warnings.append(f"Rad {r_num}: saknar 'Roll' — hoppar över.")
+            continue
+
+        status = (row[col_idx["Status"]] or STATUSES[0])
+        status = str(status).strip()
+        if status not in STATUSES:
+            warnings.append(f"Rad {r_num}: okänd status '{status}' → '{STATUSES[0]}'.")
+            status = STATUSES[0]
+
+        price_raw = row[col_idx["Lämnat timpris"]]
+        if price_raw is None or (isinstance(price_raw, str) and not price_raw.strip()):
+            price = None
+        else:
+            try:
+                price = int(price_raw)
+            except (TypeError, ValueError):
+                warnings.append(f"Rad {r_num}: pris '{price_raw}' kunde inte tolkas → tomt.")
+                price = None
+
+        def _text(col: str) -> str:
+            v = row[col_idx[col]]
+            return str(v).strip() if v is not None else ""
+
+        assignment = {
+            "id": str(uuid.uuid4()),
+            "name": str(name_val).strip(),
+            "date": _excel_date_to_iso(row[col_idx["Datum"]]),
+            "consultant": _normalize_consultant(row[col_idx["Konsult"]]),
+            "status": status,
+            "customer": _text("Kund"),
+            "broker": _text("Mäklare"),
+            "url": _text("Länk till uppdraget"),
+            "contact_person": _text("Kontaktperson"),
+            "contact_phone": _text("Telefon"),
+            "contact_email": _text("Mail"),
+            "price": price,
+        }
+
+        comment = row[col_idx[EXCEL_COMMENT_COL]]
+        if comment and str(comment).strip():
+            assignment["notes"] = [{"text": str(comment).strip(), "timestamp": now}]
+
+        parsed.append(assignment)
+
+    return parsed, warnings
 
 
 def add_note(assignment_id: str, text: str) -> None:
@@ -191,6 +329,39 @@ col_btn.button(
     type="primary",
     on_click=lambda: st.session_state.update({"creating": True}),
 )
+
+# --- Excel import ---
+# Collapsed expander so it stays out of the way until needed. Importing is
+# append-only and lives under the same Entra-gated UI as the rest of the page.
+with st.expander("📂 Importera från Excel"):
+    st.caption(
+        "Förväntade kolumner: " + ", ".join(list(EXCEL_COLUMN_MAP.keys()) + [EXCEL_COMMENT_COL]) + "."
+    )
+    uploaded = st.file_uploader("Välj .xlsx-fil", type=["xlsx"], key="import_xlsx")
+    if uploaded is not None:
+        signature = (uploaded.name, uploaded.size)
+        if st.session_state.get("last_imported_signature") == signature:
+            st.info(
+                f"'{uploaded.name}' har redan importerats i denna session. "
+                "Ta bort filen ovan för att importera igen."
+            )
+        else:
+            parsed, warnings = parse_excel(uploaded)
+            for w in warnings:
+                st.warning(w)
+            if parsed:
+                st.write(f"**Förhandsgranskning – {len(parsed)} uppdrag att importera:**")
+                preview = [
+                    {COLUMN_LABELS[k]: a[k] for k in LIST_COLUMNS}
+                    for a in parsed
+                ]
+                st.dataframe(preview, use_container_width=True, hide_index=True)
+                if st.button(f"Importera {len(parsed)} uppdrag", type="primary", key="confirm_import"):
+                    existing = load_assignments()
+                    save_assignments(existing + parsed)
+                    st.session_state["last_imported_signature"] = signature
+                    st.success(f"Importerade {len(parsed)} uppdrag.")
+                    st.rerun()
 
 assignments = load_assignments()
 
