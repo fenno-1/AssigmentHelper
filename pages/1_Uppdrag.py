@@ -209,6 +209,12 @@ def add_note(assignment_id: str, text: str) -> None:
     save_assignments(assignments)
 
 
+def delete_assignment(assignment_id: str) -> None:
+    assignments = load_assignments()
+    assignments = [a for a in assignments if a["id"] != assignment_id]
+    save_assignments(assignments)
+
+
 def empty_assignment() -> dict:
     return {
         "id": str(uuid.uuid4()),
@@ -258,7 +264,29 @@ def assignment_form(assignment: dict, is_new: bool) -> None:
         submitted = col_save.form_submit_button("Spara", type="primary")
         cancelled = col_cancel.form_submit_button("Avbryt")
 
+    # Delete lives outside the form so it can use a two-step confirmation
+    # (a form_submit_button would also save/validate the open fields).
+    if not is_new:
+        st.divider()
+        if not st.session_state.get("confirm_delete"):
+            if st.button("🗑 Ta bort", key="delete_assignment"):
+                st.session_state["confirm_delete"] = True
+                st.rerun()
+        else:
+            st.warning("Är du säker på att du vill ta bort uppdraget? Det går inte att ångra.")
+            col_yes, col_no = st.columns([1, 5])
+            if col_yes.button("Ja, ta bort", type="primary", key="confirm_delete_yes"):
+                delete_assignment(assignment["id"])
+                st.session_state.pop("editing_id", None)
+                st.session_state.pop("confirm_delete", None)
+                st.success("Uppdraget togs bort.")
+                st.rerun()
+            if col_no.button("Avbryt", key="confirm_delete_no"):
+                st.session_state.pop("confirm_delete", None)
+                st.rerun()
+
     if cancelled:
+        st.session_state.pop("confirm_delete", None)
         st.session_state.pop("editing_id", None)
         st.session_state.pop("creating", None)
         st.rerun()
@@ -295,6 +323,7 @@ def assignment_form(assignment: dict, is_new: bool) -> None:
         save_assignments(assignments)
         st.session_state.pop("editing_id", None)
         st.session_state.pop("creating", None)
+        st.session_state.pop("confirm_delete", None)
         st.success("Sparat!")
         st.rerun()
 
@@ -375,14 +404,76 @@ assignments_sorted = sorted(assignments, key=lambda a: a.get("date", ""), revers
 # Build display table with a clickable name column
 st.write("Klicka på ett uppdragsnamn för att redigera.")
 
-header_cols = st.columns([2, 1, 1.5, 1, 1.5, 1.5, 2, 1.5, 1.2, 1.8, 1])
+COL_WIDTHS = [2, 1, 1.5, 1, 1.5, 1.5, 2, 1.5, 1.2, 1.8, 1]
+# Columns with a fixed value set get a dropdown filter; status gets a
+# multiselect (defaulting to the active statuses); the rest get free-text
+# substring filtering.
+SELECT_FILTERS = {"consultant": CONSULTANTS}
+MULTI_FILTERS = {"status": STATUSES}
+STATUS_DEFAULT = ["Öppen", "Intervju"]
+
+# Seed the status multiselect once so we can both render its popover label and
+# read the selection without passing default= alongside key= (which warns).
+if "filter_status" not in st.session_state:
+    st.session_state["filter_status"] = STATUS_DEFAULT
+
+header_cols = st.columns(COL_WIDTHS)
+filters: dict[str, object] = {}
 for col, key in zip(header_cols, LIST_COLUMNS):
     col.markdown(f"**{COLUMN_LABELS[key]}**")
+    if key in MULTI_FILTERS:
+        # A multiselect is unusable in this narrow column, so put it inside a
+        # full-width popover; the trigger button still sits under the header.
+        selected = st.session_state.get(f"filter_{key}", [])
+        trigger = f"Filter ({len(selected)})" if selected else "Alla"
+        with col.popover(trigger, use_container_width=True):
+            filters[key] = st.multiselect(
+                COLUMN_LABELS[key],
+                MULTI_FILTERS[key],
+                key=f"filter_{key}",
+                label_visibility="collapsed",
+            )
+    elif key in SELECT_FILTERS:
+        filters[key] = col.selectbox(
+            COLUMN_LABELS[key],
+            ["Alla"] + SELECT_FILTERS[key],
+            key=f"filter_{key}",
+            label_visibility="collapsed",
+        )
+    else:
+        filters[key] = col.text_input(
+            COLUMN_LABELS[key],
+            key=f"filter_{key}",
+            label_visibility="collapsed",
+            placeholder="Filtrera",
+        )
+
+
+def _matches_filters(a: dict) -> bool:
+    for key, val in filters.items():
+        cell = str(a.get(key) if a.get(key) is not None else "")
+        if key in MULTI_FILTERS:
+            # Empty selection = no filtering (show all statuses)
+            if val and cell not in val:
+                return False
+        elif key in SELECT_FILTERS:
+            if val and val != "Alla" and cell != val:
+                return False
+        elif val and val.lower() not in cell.lower():
+            return False
+    return True
+
+
+filtered = [a for a in assignments_sorted if _matches_filters(a)]
 
 st.divider()
 
-for assignment in assignments_sorted:
-    row_cols = st.columns([2, 1, 1.5, 1, 1.5, 1.5, 2, 1.5, 1.2, 1.8, 1])
+if not filtered:
+    st.info("Inga uppdrag matchar filtret.")
+    st.stop()
+
+for assignment in filtered:
+    row_cols = st.columns(COL_WIDTHS)
 
     # Name as a button to trigger edit
     if row_cols[0].button(assignment.get("name", "(inget namn)"), key=f"edit_{assignment['id']}"):
