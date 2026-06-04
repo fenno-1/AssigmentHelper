@@ -9,7 +9,7 @@ import streamlit as st
 st.set_page_config(page_title="Uppdrag", page_icon="📁", layout="wide")
 
 CONSULTANTS = ["Manuel Kandala", "Mia Aspberg", "Magnus Sörin"]
-STATUSES = ["Öppen", "Intervju", "Vunnen", "Förlorad", "Avböjd"]
+STATUSES = ["Öppen", "Intervju", "Pausad", "Vunnen", "Förlorad", "Avböjd"]
 
 # Short-name → canonical mapping used by the Excel importer so that a row with
 # "Manuel" resolves to "Manuel Kandala", etc. Add more aliases here as needed.
@@ -209,6 +209,15 @@ def add_note(assignment_id: str, text: str) -> None:
     save_assignments(assignments)
 
 
+def _normalize_url(url: str) -> str:
+    """Ensure a URL has a scheme so it renders as an absolute, clickable link.
+    Without this, values like 'www.cinode.com/...' are treated as relative."""
+    url = (url or "").strip()
+    if url and not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    return url
+
+
 def delete_assignment(assignment_id: str) -> None:
     assignments = load_assignments()
     assignments = [a for a in assignments if a["id"] != assignment_id]
@@ -225,6 +234,7 @@ def empty_assignment() -> dict:
         "customer": "",
         "broker": "",
         "url": "",
+        "description": "",
         "contact_person": "",
         "contact_phone": "",
         "contact_email": "",
@@ -248,6 +258,19 @@ def assignment_form(assignment: dict, is_new: bool) -> None:
         customer = st.text_input("Kund", value=assignment.get("customer", ""))
         broker = st.text_input("Förmedlare", value=assignment.get("broker", ""))
         url = st.text_input("Uppdragets URL", value=assignment.get("url", ""))
+        saved_url = _normalize_url(assignment.get("url", ""))
+        if saved_url:
+            st.markdown(
+                f'🔗 <a href="{saved_url}" target="_blank" rel="noopener noreferrer">Öppna uppdragslänk</a>',
+                unsafe_allow_html=True,
+            )
+        description = st.text_area(
+            "Uppdragsbeskrivning",
+            value=assignment.get("description", ""),
+            height=200,
+            help="Fritext. Fyll i manuellt när uppdraget saknar URL.",
+        )
+
         contact_person = st.text_input("Kontaktperson", value=assignment.get("contact_person", ""))
         contact_phone = st.text_input("Telefon", value=assignment.get("contact_phone", ""))
         contact_email = st.text_input("E-post", value=assignment.get("contact_email", ""))
@@ -308,6 +331,7 @@ def assignment_form(assignment: dict, is_new: bool) -> None:
             "customer": customer.strip(),
             "broker": broker.strip(),
             "url": url.strip(),
+            "description": description.strip(),
             "contact_person": contact_person.strip(),
             "contact_phone": contact_phone.strip(),
             "contact_email": contact_email.strip(),
@@ -486,9 +510,12 @@ for assignment in filtered:
     row_cols[4].write(assignment.get("customer", ""))
     row_cols[5].write(assignment.get("broker", ""))
 
-    url = assignment.get("url", "")
+    url = _normalize_url(assignment.get("url", ""))
     if url:
-        row_cols[6].markdown(f"[länk]({url})")
+        row_cols[6].markdown(
+            f'<a href="{url}" target="_blank" rel="noopener noreferrer">länk</a>',
+            unsafe_allow_html=True,
+        )
     else:
         row_cols[6].write("")
 
