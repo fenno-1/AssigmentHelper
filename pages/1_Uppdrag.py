@@ -422,8 +422,24 @@ if not assignments:
     st.info("Inga uppdrag registrerade ännu. Klicka på 'Nytt uppdrag' för att börja.")
     st.stop()
 
-# Sort by date descending by default
-assignments_sorted = sorted(assignments, key=lambda a: a.get("date", ""), reverse=True)
+# Sort state: clicking a column header sorts by it; clicking the same header
+# again toggles the direction. Defaults to date descending.
+if "sort_key" not in st.session_state:
+    st.session_state["sort_key"] = "date"
+    st.session_state["sort_desc"] = True
+
+
+def _sort_value(a: dict):
+    v = a.get(st.session_state["sort_key"])
+    if st.session_state["sort_key"] == "price":
+        # Numeric sort; missing prices sort first ascending / last descending.
+        return v if isinstance(v, (int, float)) else float("-inf")
+    return str(v if v is not None else "").lower()
+
+
+assignments_sorted = sorted(
+    assignments, key=_sort_value, reverse=st.session_state["sort_desc"]
+)
 
 # Build display table with a clickable name column
 st.write("Klicka på ett uppdragsnamn för att redigera.")
@@ -444,7 +460,22 @@ if "filter_status" not in st.session_state:
 header_cols = st.columns(COL_WIDTHS)
 filters: dict[str, object] = {}
 for col, key in zip(header_cols, LIST_COLUMNS):
-    col.markdown(f"**{COLUMN_LABELS[key]}**")
+    # Header doubles as a sort toggle: an arrow marks the active sort column and
+    # its direction; clicking the active column flips direction.
+    arrow = ""
+    if st.session_state["sort_key"] == key:
+        arrow = " ▼" if st.session_state["sort_desc"] else " ▲"
+    if col.button(
+        f"{COLUMN_LABELS[key]}{arrow}",
+        key=f"sort_{key}",
+        use_container_width=True,
+    ):
+        if st.session_state["sort_key"] == key:
+            st.session_state["sort_desc"] = not st.session_state["sort_desc"]
+        else:
+            st.session_state["sort_key"] = key
+            st.session_state["sort_desc"] = False
+        st.rerun()
     if key in MULTI_FILTERS:
         # A multiselect is unusable in this narrow column, so put it inside a
         # full-width popover; the trigger button still sits under the header.
