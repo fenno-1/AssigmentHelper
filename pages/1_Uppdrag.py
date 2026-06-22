@@ -195,6 +195,61 @@ def parse_excel(file) -> tuple[list[dict], list[str]]:
     return parsed, warnings
 
 
+def build_excel_export(assignments: list[dict]) -> bytes:
+    """Render assignments to an .xlsx workbook and return its bytes.
+
+    Each assignment is one row using the same columns as the list view. Its
+    notes follow as grouped (outline level 1) rows directly beneath it, so
+    Excel shows a +/- control to expand/collapse the notes per assignment.
+    Returns an empty byte string if openpyxl is unavailable."""
+    try:
+        from io import BytesIO
+
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Font
+    except ImportError:
+        return b""
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Uppdrag"
+    # Summary (assignment) row sits above its note detail rows, so the outline
+    # expand button must render on the row above the group, not below it.
+    ws.sheet_properties.outlinePr.summaryBelow = False
+
+    headers = [COLUMN_LABELS[k] for k in LIST_COLUMNS]
+    ws.append(headers)
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+
+    for a in assignments:
+        row = []
+        for k in LIST_COLUMNS:
+            v = a.get(k)
+            if k == "url":
+                v = _normalize_url(v) if v else ""
+            row.append(v if v is not None else "")
+        ws.append(row)
+
+        for note in a.get("notes", []):
+            ws.append([note.get("timestamp", ""), note.get("text", "")])
+            r = ws.max_row
+            ws.row_dimensions[r].outlineLevel = 1
+            ws.row_dimensions[r].hidden = True
+            ws[f"B{r}"].alignment = Alignment(wrap_text=True, vertical="top")
+
+    # Reasonable column widths; notes text (col B) gets the most room.
+    widths = {"A": 22, "B": 50, "C": 16, "D": 12, "E": 20, "F": 20,
+              "G": 30, "H": 18, "I": 14, "J": 24, "K": 12}
+    for col, w in widths.items():
+        ws.column_dimensions[col].width = w
+    ws.freeze_panes = "A2"
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def add_note(assignment_id: str, text: str) -> None:
     assignments = load_assignments()
     for a in assignments:
@@ -526,6 +581,14 @@ st.divider()
 if not filtered:
     st.info("Inga uppdrag matchar filtret.")
     st.stop()
+
+# Export the currently filtered/sorted view. Notes ride along as grouped rows.
+st.download_button(
+    f"⬇ Exportera {len(filtered)} uppdrag till Excel",
+    data=build_excel_export(filtered),
+    file_name=f"uppdrag_{date.today().isoformat()}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
 
 for assignment in filtered:
     row_cols = st.columns(COL_WIDTHS)
