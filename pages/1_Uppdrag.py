@@ -8,7 +8,31 @@ import streamlit as st
 
 st.set_page_config(page_title="Uppdrag", page_icon="📁", layout="wide")
 
-CONSULTANTS = ["Manuel Kandala", "Mia Aspberg", "Magnus Sörin"]
+# Active consultants first (index 0 is the default for new/unknown assignments),
+# then individuals carried over from the historik-sokta-uppdrag import so they
+# stay selectable. Multi-person / unknown historical values are left as free
+# text on those records and intentionally not listed here.
+CONSULTANTS = [
+    "Manuel Kandala",
+    "Mia Aspberg",
+    "Magnus Sörin",
+    "Alexis",
+    "Andreas Behrendtz",
+    "Carl-Fredrik",
+    "Christoffer Atle",
+    "Illia Shypko",
+    "Jack Johansson",
+    "Joakim Fennö",
+    "Jonas Åkerfeldt",
+    "Kenneth",
+    "Leif",
+    "Lubomir",
+    "Nikita",
+    "Ossian",
+    "Per",
+    "Stefan",
+    "Steve Binning",
+]
 STATUSES = ["Öppen", "Intervju", "Pausad", "Vunnen", "Förlorad", "Avböjd"]
 
 # Short-name → canonical mapping used by the Excel importer so that a row with
