@@ -8,8 +8,32 @@ import streamlit as st
 
 st.set_page_config(page_title="Uppdrag", page_icon="📁", layout="wide")
 
-CONSULTANTS = ["Manuel Kandala", "Mia Aspberg", "Magnus Sörin"]
-STATUSES = ["Öppen", "Intervju", "Vunnen", "Förlorad", "Avböjd"]
+# Active consultants first (index 0 is the default for new/unknown assignments),
+# then individuals carried over from the historik-sokta-uppdrag import so they
+# stay selectable. Multi-person / unknown historical values are left as free
+# text on those records and intentionally not listed here.
+CONSULTANTS = [
+    "Manuel Kandala",
+    "Mia Aspberg",
+    "Magnus Sörin",
+    "Alexis",
+    "Andreas Behrendtz",
+    "Carl-Fredrik",
+    "Christoffer Atle",
+    "Illia Shypko",
+    "Jack Johansson",
+    "Joakim Fennö",
+    "Jonas Åkerfeldt",
+    "Kenneth",
+    "Leif",
+    "Lubomir",
+    "Nikita",
+    "Ossian",
+    "Per",
+    "Stefan",
+    "Steve Binning",
+]
+STATUSES = ["Öppen", "Intervju", "Pausad", "Vunnen", "Förlorad", "Avböjd"]
 
 # Short-name → canonical mapping used by the Excel importer so that a row with
 # "Manuel" resolves to "Manuel Kandala", etc. Add more aliases here as needed.
@@ -195,6 +219,61 @@ def parse_excel(file) -> tuple[list[dict], list[str]]:
     return parsed, warnings
 
 
+def build_excel_export(assignments: list[dict]) -> bytes:
+    """Render assignments to an .xlsx workbook and return its bytes.
+
+    Each assignment is one row using the same columns as the list view. Its
+    notes follow as grouped (outline level 1) rows directly beneath it, so
+    Excel shows a +/- control to expand/collapse the notes per assignment.
+    Returns an empty byte string if openpyxl is unavailable."""
+    try:
+        from io import BytesIO
+
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Font
+    except ImportError:
+        return b""
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Uppdrag"
+    # Summary (assignment) row sits above its note detail rows, so the outline
+    # expand button must render on the row above the group, not below it.
+    ws.sheet_properties.outlinePr.summaryBelow = False
+
+    headers = [COLUMN_LABELS[k] for k in LIST_COLUMNS]
+    ws.append(headers)
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+
+    for a in assignments:
+        row = []
+        for k in LIST_COLUMNS:
+            v = a.get(k)
+            if k == "url":
+                v = _normalize_url(v) if v else ""
+            row.append(v if v is not None else "")
+        ws.append(row)
+
+        for note in a.get("notes", []):
+            ws.append([note.get("timestamp", ""), note.get("text", "")])
+            r = ws.max_row
+            ws.row_dimensions[r].outlineLevel = 1
+            ws.row_dimensions[r].hidden = True
+            ws[f"B{r}"].alignment = Alignment(wrap_text=True, vertical="top")
+
+    # Reasonable column widths; notes text (col B) gets the most room.
+    widths = {"A": 22, "B": 50, "C": 16, "D": 12, "E": 20, "F": 20,
+              "G": 30, "H": 18, "I": 14, "J": 24, "K": 12}
+    for col, w in widths.items():
+        ws.column_dimensions[col].width = w
+    ws.freeze_panes = "A2"
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def add_note(assignment_id: str, text: str) -> None:
     assignments = load_assignments()
     for a in assignments:
@@ -209,6 +288,21 @@ def add_note(assignment_id: str, text: str) -> None:
     save_assignments(assignments)
 
 
+def _normalize_url(url: str) -> str:
+    """Ensure a URL has a scheme so it renders as an absolute, clickable link.
+    Without this, values like 'www.cinode.com/...' are treated as relative."""
+    url = (url or "").strip()
+    if url and not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    return url
+
+
+def delete_assignment(assignment_id: str) -> None:
+    assignments = load_assignments()
+    assignments = [a for a in assignments if a["id"] != assignment_id]
+    save_assignments(assignments)
+
+
 def empty_assignment() -> dict:
     return {
         "id": str(uuid.uuid4()),
@@ -219,6 +313,7 @@ def empty_assignment() -> dict:
         "customer": "",
         "broker": "",
         "url": "",
+        "description": "",
         "contact_person": "",
         "contact_phone": "",
         "contact_email": "",
@@ -242,6 +337,19 @@ def assignment_form(assignment: dict, is_new: bool) -> None:
         customer = st.text_input("Kund", value=assignment.get("customer", ""))
         broker = st.text_input("Förmedlare", value=assignment.get("broker", ""))
         url = st.text_input("Uppdragets URL", value=assignment.get("url", ""))
+        saved_url = _normalize_url(assignment.get("url", ""))
+        if saved_url:
+            st.markdown(
+                f'🔗 <a href="{saved_url}" target="_blank" rel="noopener noreferrer">Öppna uppdragslänk</a>',
+                unsafe_allow_html=True,
+            )
+        description = st.text_area(
+            "Uppdragsbeskrivning",
+            value=assignment.get("description", ""),
+            height=200,
+            help="Fritext. Fyll i manuellt när uppdraget saknar URL.",
+        )
+
         contact_person = st.text_input("Kontaktperson", value=assignment.get("contact_person", ""))
         contact_phone = st.text_input("Telefon", value=assignment.get("contact_phone", ""))
         contact_email = st.text_input("E-post", value=assignment.get("contact_email", ""))
@@ -258,7 +366,29 @@ def assignment_form(assignment: dict, is_new: bool) -> None:
         submitted = col_save.form_submit_button("Spara", type="primary")
         cancelled = col_cancel.form_submit_button("Avbryt")
 
+    # Delete lives outside the form so it can use a two-step confirmation
+    # (a form_submit_button would also save/validate the open fields).
+    if not is_new:
+        st.divider()
+        if not st.session_state.get("confirm_delete"):
+            if st.button("🗑 Ta bort", key="delete_assignment"):
+                st.session_state["confirm_delete"] = True
+                st.rerun()
+        else:
+            st.warning("Är du säker på att du vill ta bort uppdraget? Det går inte att ångra.")
+            col_yes, col_no = st.columns([1, 5])
+            if col_yes.button("Ja, ta bort", type="primary", key="confirm_delete_yes"):
+                delete_assignment(assignment["id"])
+                st.session_state.pop("editing_id", None)
+                st.session_state.pop("confirm_delete", None)
+                st.success("Uppdraget togs bort.")
+                st.rerun()
+            if col_no.button("Avbryt", key="confirm_delete_no"):
+                st.session_state.pop("confirm_delete", None)
+                st.rerun()
+
     if cancelled:
+        st.session_state.pop("confirm_delete", None)
         st.session_state.pop("editing_id", None)
         st.session_state.pop("creating", None)
         st.rerun()
@@ -280,6 +410,7 @@ def assignment_form(assignment: dict, is_new: bool) -> None:
             "customer": customer.strip(),
             "broker": broker.strip(),
             "url": url.strip(),
+            "description": description.strip(),
             "contact_person": contact_person.strip(),
             "contact_phone": contact_phone.strip(),
             "contact_email": contact_email.strip(),
@@ -295,6 +426,7 @@ def assignment_form(assignment: dict, is_new: bool) -> None:
         save_assignments(assignments)
         st.session_state.pop("editing_id", None)
         st.session_state.pop("creating", None)
+        st.session_state.pop("confirm_delete", None)
         st.success("Sparat!")
         st.rerun()
 
@@ -369,20 +501,121 @@ if not assignments:
     st.info("Inga uppdrag registrerade ännu. Klicka på 'Nytt uppdrag' för att börja.")
     st.stop()
 
-# Sort by date descending by default
-assignments_sorted = sorted(assignments, key=lambda a: a.get("date", ""), reverse=True)
+# Sort state: clicking a column header sorts by it; clicking the same header
+# again toggles the direction. Defaults to date descending.
+if "sort_key" not in st.session_state:
+    st.session_state["sort_key"] = "date"
+    st.session_state["sort_desc"] = True
+
+
+def _sort_value(a: dict):
+    v = a.get(st.session_state["sort_key"])
+    if st.session_state["sort_key"] == "price":
+        # Numeric sort; missing prices sort first ascending / last descending.
+        return v if isinstance(v, (int, float)) else float("-inf")
+    return str(v if v is not None else "").lower()
+
+
+assignments_sorted = sorted(
+    assignments, key=_sort_value, reverse=st.session_state["sort_desc"]
+)
 
 # Build display table with a clickable name column
 st.write("Klicka på ett uppdragsnamn för att redigera.")
 
-header_cols = st.columns([2, 1, 1.5, 1, 1.5, 1.5, 2, 1.5, 1.2, 1.8, 1])
+COL_WIDTHS = [2, 1, 1.5, 1, 1.5, 1.5, 2, 1.5, 1.2, 1.8, 1]
+# Columns with a fixed value set get a dropdown filter; status gets a
+# multiselect (defaulting to the active statuses); the rest get free-text
+# substring filtering.
+SELECT_FILTERS = {"consultant": CONSULTANTS}
+MULTI_FILTERS = {"status": STATUSES}
+STATUS_DEFAULT = ["Öppen", "Intervju"]
+
+# Seed the status multiselect once so we can both render its popover label and
+# read the selection without passing default= alongside key= (which warns).
+if "filter_status" not in st.session_state:
+    st.session_state["filter_status"] = STATUS_DEFAULT
+
+header_cols = st.columns(COL_WIDTHS)
+filters: dict[str, object] = {}
 for col, key in zip(header_cols, LIST_COLUMNS):
-    col.markdown(f"**{COLUMN_LABELS[key]}**")
+    # Header doubles as a sort toggle: an arrow marks the active sort column and
+    # its direction; clicking the active column flips direction.
+    arrow = ""
+    if st.session_state["sort_key"] == key:
+        arrow = " ▼" if st.session_state["sort_desc"] else " ▲"
+    if col.button(
+        f"{COLUMN_LABELS[key]}{arrow}",
+        key=f"sort_{key}",
+        use_container_width=True,
+    ):
+        if st.session_state["sort_key"] == key:
+            st.session_state["sort_desc"] = not st.session_state["sort_desc"]
+        else:
+            st.session_state["sort_key"] = key
+            st.session_state["sort_desc"] = False
+        st.rerun()
+    if key in MULTI_FILTERS:
+        # A multiselect is unusable in this narrow column, so put it inside a
+        # full-width popover; the trigger button still sits under the header.
+        selected = st.session_state.get(f"filter_{key}", [])
+        trigger = f"Filter ({len(selected)})" if selected else "Alla"
+        with col.popover(trigger, use_container_width=True):
+            filters[key] = st.multiselect(
+                COLUMN_LABELS[key],
+                MULTI_FILTERS[key],
+                key=f"filter_{key}",
+                label_visibility="collapsed",
+            )
+    elif key in SELECT_FILTERS:
+        filters[key] = col.selectbox(
+            COLUMN_LABELS[key],
+            ["Alla"] + SELECT_FILTERS[key],
+            key=f"filter_{key}",
+            label_visibility="collapsed",
+        )
+    else:
+        filters[key] = col.text_input(
+            COLUMN_LABELS[key],
+            key=f"filter_{key}",
+            label_visibility="collapsed",
+            placeholder="Filtrera",
+        )
+
+
+def _matches_filters(a: dict) -> bool:
+    for key, val in filters.items():
+        cell = str(a.get(key) if a.get(key) is not None else "")
+        if key in MULTI_FILTERS:
+            # Empty selection = no filtering (show all statuses)
+            if val and cell not in val:
+                return False
+        elif key in SELECT_FILTERS:
+            if val and val != "Alla" and cell != val:
+                return False
+        elif val and val.lower() not in cell.lower():
+            return False
+    return True
+
+
+filtered = [a for a in assignments_sorted if _matches_filters(a)]
 
 st.divider()
 
-for assignment in assignments_sorted:
-    row_cols = st.columns([2, 1, 1.5, 1, 1.5, 1.5, 2, 1.5, 1.2, 1.8, 1])
+if not filtered:
+    st.info("Inga uppdrag matchar filtret.")
+    st.stop()
+
+# Export the currently filtered/sorted view. Notes ride along as grouped rows.
+st.download_button(
+    f"⬇ Exportera {len(filtered)} uppdrag till Excel",
+    data=build_excel_export(filtered),
+    file_name=f"uppdrag_{date.today().isoformat()}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
+
+for assignment in filtered:
+    row_cols = st.columns(COL_WIDTHS)
 
     # Name as a button to trigger edit
     if row_cols[0].button(assignment.get("name", "(inget namn)"), key=f"edit_{assignment['id']}"):
@@ -395,9 +628,12 @@ for assignment in assignments_sorted:
     row_cols[4].write(assignment.get("customer", ""))
     row_cols[5].write(assignment.get("broker", ""))
 
-    url = assignment.get("url", "")
+    url = _normalize_url(assignment.get("url", ""))
     if url:
-        row_cols[6].markdown(f"[länk]({url})")
+        row_cols[6].markdown(
+            f'<a href="{url}" target="_blank" rel="noopener noreferrer">länk</a>',
+            unsafe_allow_html=True,
+        )
     else:
         row_cols[6].write("")
 

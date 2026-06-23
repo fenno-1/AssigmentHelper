@@ -8,3 +8,4 @@ dist/
 .claude/
 assignments.json
 data/
+.import_work/
